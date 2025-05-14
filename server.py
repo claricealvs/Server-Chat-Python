@@ -2,165 +2,138 @@ import socket
 import threading
 from cryptography.fernet import Fernet
 
+# === Criptografia ===
 chave_secreta = b'Qv5jwkrmmuZ1lgGNOYyk7UCy4dlNHkSXiRjLBNn-HHY='
 fernet = Fernet(chave_secreta)
 
-clientes_grupo = []
-nicknames = {}  # conexao: nickname
-clientes_privado = {}  # nickname: conexao
-pares_privados = {}  # nickname: outro_nickname
+def criptografar(texto):
+    return fernet.encrypt(texto.encode())
 
+def descriptografar(texto_criptografado):
+    return fernet.decrypt(texto_criptografado).decode()
 
-def broadcast(mensagem_criptografada, remetente):
-    for cliente in clientes_grupo:
-        if cliente != remetente:
+# === Estruturas de dados ===
+clients = {}  # username -> conn
+group_chat = set()  # usernames
+private_chats = {}  # frozenset([user1, user2]) -> (conn1, conn2)
+invitations = {}  # receiver -> sender
+
+def broadcast_group(message, sender):
+    for user in group_chat:
+        if user != sender:
             try:
-                cliente.sendall(mensagem_criptografada)
+                clients[user].send(criptografar(f"[GRUPO] {sender}: {message}"))
             except:
-                cliente.close()
-                if cliente in clientes_grupo:
-                    clientes_grupo.remove(cliente)
+                pass
 
+def handle_client(conn, addr):
+    while True:
+        conn.send(criptografar("Digite seu nome de usuário: "))
+        username = descriptografar(conn.recv(1024)).strip()
 
-def enviar_privado(destinatario_nome, mensagem_criptografada, remetente):
-    destinatario = clientes_privado.get(destinatario_nome)
-    if destinatario and destinatario != remetente:
-        try:
-            destinatario.sendall(mensagem_criptografada)
-        except:
-            destinatario.close()
-            if destinatario_nome in clientes_privado:
-                del clientes_privado[destinatario_nome]
+        if username in clients:
+            conn.send(criptografar("Esse nome de usuário já está em uso. Tente outro.\n"))
+        else:
+            break
 
-
-def lidar_com_cliente(conexao, endereco):
-    nickname = ""
-    try:
-        # Receber nickname
-        while True:
-            dados = conexao.recv(4096)
-            mensagem = fernet.decrypt(dados).decode()
-            if mensagem.startswith("NICK:"):
-                nickname = mensagem.split(":", 1)[1].strip()
-                if nickname in nicknames.values():
-                    conexao.sendall(fernet.encrypt(b"DENIED"))
-                else:
-                    nicknames[conexao] = nickname
-                    clientes_privado[nickname] = conexao
-                    conexao.sendall(fernet.encrypt(b"OK"))
-                    break
-
-        while True:
-            # Receber tipo de conversa
-            cabecalho = conexao.recv(4096)
-            if not cabecalho:
-                break
-            tipo_conversa = fernet.decrypt(cabecalho).decode().strip().lower()
-
-            # --------------------- MODO GRUPO ---------------------
-            if tipo_conversa == "grupo":
-                if conexao not in clientes_grupo:
-                    clientes_grupo.append(conexao)
-                conexao.sendall(fernet.encrypt(b"OK"))
-                print(f"[GRUPO] {nickname} entrou no chat.")
-
-                while True:
-                    dados = conexao.recv(4096)
-                    if not dados:
-                        return
-                    mensagem = fernet.decrypt(dados).decode()
-
-                    # Se mudar de modo
-                    if mensagem.lower().startswith("privado/"):
-                        break
-
-                    print(f"[GRUPO] {mensagem}")
-                    broadcast(fernet.encrypt(f"{nickname}: {mensagem}".encode()), conexao)
-
-            # --------------------- MODO PRIVADO ---------------------
-            elif tipo_conversa.startswith("privado/"):
-                destinatario_nome = tipo_conversa.split("/", 1)[1].strip()
-
-                if destinatario_nome not in clientes_privado:
-                    conexao.sendall(fernet.encrypt(b"DESTINATARIO_NAO_ENCONTRADO"))
-                    continue
-
-                destinatario_con = clientes_privado[destinatario_nome]
-
-                convite_msg = f"CONVITE:{nickname} deseja conversar em privado. Aceitar? (responda OK ou NAO)"
-                destinatario_con.sendall(fernet.encrypt(convite_msg.encode()))
-
-                resposta = fernet.decrypt(destinatario_con.recv(4096)).decode().strip().upper()
-                print("[PRIVADO] recebendo resposta:", resposta)
-                if resposta != "OK":
-                    conexao.sendall(fernet.encrypt(b"RECUSADO"))
-                    continue
-
-                # Remover do grupo, se estiver
-                if conexao in clientes_grupo:
-                    clientes_grupo.remove(conexao)
-                if destinatario_con in clientes_grupo:
-                    clientes_grupo.remove(destinatario_con)
-
-                # Registrar pares
-                pares_privados[nickname] = destinatario_nome
-                pares_privados[destinatario_nome] = nickname
-
-                conexao.sendall(fernet.encrypt(b"OK"))
-                destinatario_con.sendall(fernet.encrypt(b"OK"))
-                print(f"[PRIVADO] {nickname} e {destinatario_nome} agora estão em conversa privada.")
-
-                while True:
-                    dados = conexao.recv(4096)
-                    if not dados:
-                        return
-                    mensagem = fernet.decrypt(dados).decode()
-
-                    # Se mudar de modo
-                    if mensagem.lower() == "grupo":
-                        break
-
-                    parceiro = pares_privados.get(nickname)
-                    if parceiro:
-                        enviar_privado(parceiro, fernet.encrypt(f"{nickname}: {mensagem}".encode()), conexao)
-                    else:
-                        conexao.sendall(fernet.encrypt("Erro: parceiro não encontrado".encode()))
-            else:
-                conexao.sendall(fernet.encrypt(b"COMANDO_INVALIDO"))
-
-    except Exception as e:
-        print(f"Erro com cliente {endereco}: {e}")
-    finally:
-        conexao.close()
-        if conexao in clientes_grupo:
-            clientes_grupo.remove(conexao)
-        if conexao in nicknames:
-            print(f"[DESCONECTADO] {nicknames[conexao]} saiu do chat.")
-            nome = nicknames[conexao]
-            del nicknames[conexao]
-            if nome in clientes_privado:
-                del clientes_privado[nome]
-            if nome in pares_privados:
-                parceiro = pares_privados[nome]
-                del pares_privados[nome]
-                if parceiro in pares_privados:
-                    del pares_privados[parceiro]
-
-
-def main():
-    host = 'localhost'
-    porta = 12345
-
-    servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    servidor.bind((host, porta))
-    servidor.listen(5)
-    print(f"Servidor escutando em {host}:{porta}")
+    clients[username] = conn
+    group_chat.add(username)
+    conn.send(criptografar("Bem-vindo ao chat em grupo!\n"))
 
     while True:
-        conexao, endereco = servidor.accept()
-        thread = threading.Thread(target=lidar_com_cliente, args=(conexao, endereco))
-        thread.start()
+        try:
+            msg = descriptografar(conn.recv(1024))
+            if not msg:
+                break
 
+            msg = msg.strip()
+
+            # Verifica se está em chat privado
+            private_key = None
+            for pair in private_chats:
+                if username in pair:
+                    private_key = pair
+                    break
+
+            if private_key:
+                other_user = next(user for user in private_key if user != username)
+                try:
+                    clients[other_user].send(criptografar(f"[PRIVADO] {username}: {msg}"))
+                except:
+                    pass
+                continue
+
+            if msg.startswith("/convite"):
+                _, target = msg.split(maxsplit=1)
+                if target in group_chat and target != username:
+                    invitations[target] = username
+                    clients[target].send(criptografar(f"{username} convidou você para um chat privado. Digite /aceitar para entrar.\n"))
+                else:
+                    conn.send(criptografar("Usuário inválido ou indisponível.\n"))
+
+            elif msg.startswith("/aceitar"):
+                sender = invitations.get(username)
+                if sender and sender in clients:
+                    key = frozenset((username, sender))
+                    private_chats[key] = (clients[username], clients[sender])
+                    group_chat.discard(username)
+                    group_chat.discard(sender)
+
+                    clients[sender].send(criptografar(f"{username} aceitou seu convite. Entrando em chat privado.\n"))
+                    clients[username].send(criptografar("Você entrou em chat privado.\n"))
+                else:
+                    conn.send(criptografar("Nenhum convite encontrado.\n"))
+
+            elif msg.startswith("/listar"):
+                # Envia a lista de usuários no grupo
+                user_list = "\n".join(clients.keys())
+                conn.send(criptografar(f"Usuários conectados:\n{user_list}\n"))
+
+            elif msg.startswith("/sair"):
+                if private_key:
+                    # Sai da conversa privada e volta para o grupo
+                    private_chats.pop(private_key, None)  # Remove a chave da conversa privada
+                    group_chat.add(username)
+                    other_user = next(user for user in private_key if user != username)
+                    clients[other_user].send(criptografar(f"{username} saiu da conversa privada. Voltando ao grupo.\n"))
+                    conn.send(criptografar("Você saiu da conversa privada e voltou para o grupo.\n"))
+                else:
+                    # Se estiver no grupo, fecha a conexão
+                    conn.send(criptografar("Você saiu do grupo e desconectou da aplicação.\n"))
+                    clients.pop(username, None)  # Remove o usuário do grupo
+                    group_chat.discard(username)
+                    break  # Encerra o loop e desconecta o cliente
+
+            else:
+                broadcast_group(msg, username)
+
+        except:
+            break
+
+    conn.close()
+    del clients[username]
+    group_chat.discard(username)
+
+    keys_to_remove = [k for k in private_chats if username in k]
+    for k in keys_to_remove:
+        del private_chats[k]
+
+    print(f"{username} desconectado")
+
+def start():
+    host = '127.0.0.1'
+    port = 5555
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind((host, port))
+    server.listen()
+    print(f"Servidor ouvindo em {host}:{port}")
+
+    while True:
+        conn, addr = server.accept()
+        threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
 
 if __name__ == "__main__":
-    main()
+    try:
+        start()
+    except KeyboardInterrupt:
+        print("\nServidor encerrado pelo usuário.")
