@@ -25,8 +25,8 @@ def receive_messages(sock):
             break
 
 def start():
-    host = '127.0.0.1'
-    port = 5555
+    host = '192.168.0.100'
+    port = 12345
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((host, port))
 

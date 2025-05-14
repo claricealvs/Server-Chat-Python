@@ -38,7 +38,12 @@ def handle_client(conn, addr):
 
     clients[username] = conn
     group_chat.add(username)
-    conn.send(criptografar("Bem-vindo ao chat em grupo!\n"))
+    conn.send(criptografar("Bem-vindo ao chat em grupo!\n"
+                           "comandos disponíveis:\n"
+                           "/listar - lista todos os usuarios\n"
+                           "/convite nomeusuario - manda um convite para conversa privada\n"
+                           "/aceita - aceita o convite de menssagem privada\n"
+                           "/sair para sair \n"))
 
     while True:
         try:
@@ -61,6 +66,19 @@ def handle_client(conn, addr):
                     clients[other_user].send(criptografar(f"[PRIVADO] {username}: {msg}"))
                 except:
                     pass
+
+                # Verifica se usuário deseja sair da conversa privada
+                if msg == "/sair":
+                    private_chats.pop(private_key, None)
+                    group_chat.add(username)
+                    group_chat.add(other_user)
+
+                    try:
+                        clients[other_user].send(criptografar(f"{username} saiu da conversa privada. Ambos voltaram ao grupo.\n"))
+                    except:
+                        pass
+
+                    conn.send(criptografar("Você saiu da conversa privada e voltou para o grupo.\n"))
                 continue
 
             if msg.startswith("/convite"):
@@ -85,24 +103,15 @@ def handle_client(conn, addr):
                     conn.send(criptografar("Nenhum convite encontrado.\n"))
 
             elif msg.startswith("/listar"):
-                # Envia a lista de usuários no grupo
                 user_list = "\n".join(clients.keys())
                 conn.send(criptografar(f"Usuários conectados:\n{user_list}\n"))
 
             elif msg.startswith("/sair"):
-                if private_key:
-                    # Sai da conversa privada e volta para o grupo
-                    private_chats.pop(private_key, None)  # Remove a chave da conversa privada
-                    group_chat.add(username)
-                    other_user = next(user for user in private_key if user != username)
-                    clients[other_user].send(criptografar(f"{username} saiu da conversa privada. Voltando ao grupo.\n"))
-                    conn.send(criptografar("Você saiu da conversa privada e voltou para o grupo.\n"))
-                else:
-                    # Se estiver no grupo, fecha a conexão
-                    conn.send(criptografar("Você saiu do grupo e desconectou da aplicação.\n"))
-                    clients.pop(username, None)  # Remove o usuário do grupo
-                    group_chat.discard(username)
-                    break  # Encerra o loop e desconecta o cliente
+                # Está no grupo, sai da aplicação
+                conn.send(criptografar("Você saiu do grupo e desconectou da aplicação.\n"))
+                clients.pop(username, None)
+                group_chat.discard(username)
+                break
 
             else:
                 broadcast_group(msg, username)
@@ -114,15 +123,23 @@ def handle_client(conn, addr):
     del clients[username]
     group_chat.discard(username)
 
+    # Remove o usuário de qualquer chat privado
     keys_to_remove = [k for k in private_chats if username in k]
     for k in keys_to_remove:
+        other_user = next(user for user in k if user != username)
+        try:
+            clients[other_user].send(criptografar(f"{username} saiu do chat privado (desconectado). Você voltou ao grupo.\n"))
+        except:
+            pass
+        group_chat.add(other_user)
         del private_chats[k]
 
     print(f"{username} desconectado")
 
+
 def start():
-    host = '127.0.0.1'
-    port = 5555
+    host = '192.168.0.100'
+    port = 12345
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind((host, port))
     server.listen()
