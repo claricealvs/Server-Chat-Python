@@ -11,11 +11,14 @@ from cryp import gerar_certificado_se_necessario
 fernetKey = Fernet.generate_key()
 fernet = Fernet(fernetKey)
 
+
 def criptografar(msg):
     return fernet.encrypt(msg.encode())
 
+
 def descriptografar(msg):
     return fernet.decrypt(msg).decode()
+
 
 # === Estruturas de dados ===
 clients = {}  # username -> conn
@@ -30,6 +33,7 @@ rate_limit_max_violations = 3  # número máximo de violações antes de aplicar
 rate_limit_violations = {}  # username -> contagem de violações
 rate_limit_timeouts = {}  # username -> timestamp de quando o timeout expira
 
+
 def broadcast_group(message, sender):
     for user in group_chat:
         if user != sender:
@@ -38,48 +42,6 @@ def broadcast_group(message, sender):
             except:
                 pass
 
-def check_rate_limit(username):
-    """
-    Verifica se o usuário está dentro do rate limit
-    Retorna True se a mensagem pode ser processada, False caso contrário
-    """
-    current_time = time.time()
-    
-    # Verifica se o usuário está em timeout
-    if username in rate_limit_timeouts:
-        timeout_until = rate_limit_timeouts[username]
-        if current_time < timeout_until:
-            remaining = round(timeout_until - current_time, 1)
-            return False, f"Você está enviando mensagens muito rapidamente. Aguarde mais {remaining} segundos."
-        else:
-            # Timeout expirou, remove o registro
-            del rate_limit_timeouts[username]
-            rate_limit_violations[username] = 0
-    
-    # Verifica intervalo entre mensagens
-    if username in last_message_time:
-        time_since_last_msg = current_time - last_message_time[username]
-        if time_since_last_msg < rate_limit_window:
-            # Incrementa contador de violações
-            if username not in rate_limit_violations:
-                rate_limit_violations[username] = 1
-            else:
-                rate_limit_violations[username] += 1
-            
-            # Se excedeu o limite de violações, aplica timeout
-            if rate_limit_violations[username] >= rate_limit_max_violations:
-                # Timeout progressivo: 3s, 5s, 10s, etc. (máximo de 30s)
-                timeout_duration = min(3 * (2 ** (rate_limit_violations[username] - rate_limit_max_violations)), 30)
-                rate_limit_timeouts[username] = current_time + timeout_duration
-                return False, f"Rate limit excedido! Timeout de {timeout_duration} segundos aplicado."
-            
-            return False, "Aguarde um momento antes de enviar outra mensagem."
-    
-    # Atualiza timestamp da última mensagem
-    last_message_time[username] = current_time
-    return True, None
-
-import time
 
 def handle_client(conn, addr):
     if not enviar_chave_fernet(conn, addr):
@@ -94,31 +56,21 @@ def handle_client(conn, addr):
     group_chat.add(username)
     enviar_mensagem_inicial(conn)
 
-    # === Controle de flood: 5 mensagens por 10 segundos ===
     max_msgs = 5
     intervalo = 10  # segundos
     historico_msgs = []
 
     while True:
         try:
-            # Limpa o histórico antigo
-            agora = time.time()
-            historico_msgs = [t for t in historico_msgs if agora - t < intervalo]
+            if not check_rate_limit(historico_msgs, max_msgs, intervalo, username, conn):
+                break  # Cliente foi desconectado por flood
 
-            # Verifica se passou do limite
-            if len(historico_msgs) >= max_msgs:
-                conn.send(criptografar("Você foi desconectado por enviar muitas mensagens em pouco tempo."))
-                broadcast_group(f"{username} foi desconectado por enviar muitas mensagens em pouco tempo.","system")
-                print(f"[LOG] {username} foi desconectado por enviar muitas mensagens em pouco tempo.")
-                break  # Desconecta o cliente
-
-            # Recebe mensagem
             raw = conn.recv(1024)
             if not raw:
                 break
             msg = descriptografar(raw).strip()
 
-            historico_msgs.append(agora)
+            historico_msgs.append(time.time())
 
             if processar_comando(msg, username, conn):
                 continue
@@ -129,6 +81,21 @@ def handle_client(conn, addr):
             break
 
     encerrar_conexao(username, conn)
+
+
+def check_rate_limit(historico_msgs, max_msgs, intervalo, username, conn):
+    """Verifica se o cliente passou do limite de mensagens. Retorna True se pode continuar, False se deve ser desconectado."""
+    agora = time.time()
+    historico_msgs[:] = [t for t in historico_msgs if agora - t < intervalo]
+
+    if len(historico_msgs) >= max_msgs:
+        msg = "Você foi desconectado por enviar muitas mensagens em pouco tempo."
+        conn.send(criptografar(msg))
+        broadcast_group(f"{username} foi desconectado por enviar muitas mensagens em pouco tempo.", "system")
+        print(f"[LOG] {username} foi desconectado por enviar muitas mensagens em pouco tempo.")
+        return False
+
+    return True
 
 
 def enviar_chave_fernet(conn, addr):
@@ -158,8 +125,6 @@ def autenticar_usuario(conn):
             return username
 
 
-
-
 def enviar_mensagem_inicial(conn):
     conn.send(criptografar("Bem-vindo ao chat em grupo!\n"
                            "Digite /help para ver os comandos disponíveis.\n"))
@@ -182,22 +147,26 @@ def processar_comando(msg, username, conn):
 
     if private_key:
         other_user = next(user for user in private_key if user != username)
+
+        # Comando para sair da conversa privada
+        if msg == "/sair":
+            private_chats.pop(private_key, None)
+            group_chat.update([username, other_user])
+            try:
+                clients[other_user].send(
+                    criptografar(f"{username} saiu da conversa privada. Ambos voltaram ao grupo.\n"))
+            except:
+                pass
+            conn.send(criptografar("Você saiu da conversa privada e voltou para o grupo.\n"))
+            print(f"[LOG] {username} saiu da conversa privada com {other_user}")
+            return True
+
+        # Caso contrário, envia a mensagem normalmente
         try:
+            print(msg)
             clients[other_user].send(criptografar(f"[PRIVADO] {username}: {msg}"))
         except:
             pass
-
-            if msg == "/sair":
-                private_chats.pop(private_key, None)
-                group_chat.update([username, other_user])
-                try:
-                    clients[other_user].send(
-                        criptografar(f"{username} saiu da conversa privada. Ambos voltaram ao grupo.\n"))
-                except:
-                    pass
-                conn.send(criptografar("Você saiu da conversa privada e voltou para o grupo.\n"))
-
-                print(f"[LOG] {username} saiu da conversa privada com {other_user}")
 
         return True
 
@@ -209,7 +178,8 @@ def processar_comando(msg, username, conn):
         target = partes[1]
         if target in group_chat and target != username:
             invitations[target] = username
-            clients[target].send(criptografar(f"{username} convidou você para um chat privado. Digite /aceitar para entrar.\n"))
+            clients[target].send(
+                criptografar(f"{username} convidou você para um chat privado. Digite /aceitar para entrar.\n"))
         else:
             conn.send(criptografar("Usuário inválido ou indisponível.\n"))
         return True
@@ -257,14 +227,14 @@ def encerrar_conexao(username, conn):
     for k in [k for k in private_chats if username in k]:
         other_user = next(user for user in k if user != username)
         try:
-            clients[other_user].send(criptografar(f"{username} saiu do chat privado (desconectado). Você voltou ao grupo.\n"))
+            clients[other_user].send(
+                criptografar(f"{username} saiu do chat privado (desconectado). Você voltou ao grupo.\n"))
         except:
             pass
         group_chat.add(other_user)
         private_chats.pop(k)
 
     print(f"{username} desconectado")
-
 
 
 def start():
