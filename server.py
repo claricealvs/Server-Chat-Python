@@ -2,16 +2,20 @@ import socket
 import threading
 import time
 from cryptography.fernet import Fernet
+import ssl
+
+from client import fernet
+from cryp import gerar_certificado_se_necessario
 
 # === Criptografia ===
-chave_secreta = b'Qv5jwkrmmuZ1lgGNOYyk7UCy4dlNHkSXiRjLBNn-HHY='
-fernet = Fernet(chave_secreta)
+fernetKey = Fernet.generate_key()
+fernet = Fernet(fernetKey)
 
-def criptografar(texto):
-    return fernet.encrypt(texto.encode())
+def criptografar(msg):
+    return fernet.encrypt(msg.encode())
 
-def descriptografar(texto_criptografado):
-    return fernet.decrypt(texto_criptografado).decode()
+def descriptografar(msg):
+    return fernet.decrypt(msg).decode()
 
 # === Estruturas de dados ===
 clients = {}  # username -> conn
@@ -76,153 +80,191 @@ def check_rate_limit(username):
     return True, None
 
 def handle_client(conn, addr):
+    if not enviar_chave_fernet(conn, addr):
+        return
+
+    username = autenticar_usuario(conn)
+    if not username:
+        conn.close()
+        return
+
+    clients[username] = conn
+    group_chat.add(username)
+    enviar_mensagem_inicial(conn)
+
     while True:
-        conn.send(criptografar("Digite seu nome de usuário: "))
+        try:
+            msg = descriptografar(conn.recv(1024)).strip()
+            if not msg:
+                break
+
+            if processar_comando(msg, username, conn):
+                continue
+            broadcast_group(msg, username)
+
+        except:
+            break
+
+    encerrar_conexao(username, conn)
+
+
+def enviar_chave_fernet(conn, addr):
+    try:
+        conn.send(fernetKey + b'\n')
+        return True
+    except Exception as e:
+        print(f"Erro ao enviar chave para {addr}: {e}")
+        conn.close()
+        return False
+
+
+def autenticar_usuario(conn):
+    while True:
+        conn.send(criptografar("Digite seu nome de usuário (sem espaços): "))
         username = descriptografar(conn.recv(1024)).strip()
+
+        # Verifica se o nome de usuário contém espaços
+        if " " in username:
+            conn.send(criptografar("O nome de usuário não pode conter espaços. Tente novamente.\n"))
+            continue
 
         if username in clients:
             conn.send(criptografar("Esse nome de usuário já está em uso. Tente outro.\n"))
         else:
-            break
+            print(f"[LOG] Usuário conectado: {username}")
+            return username
 
-    clients[username] = conn
-    group_chat.add(username)
+
+
+
+def enviar_mensagem_inicial(conn):
     conn.send(criptografar("Bem-vindo ao chat em grupo!\n"
-                           "comandos disponíveis:\n"
-                           "/listar - lista todos os usuarios\n"
-                           "/convite nomeusuario - manda um convite para conversa privada\n"
-                           "/aceita - aceita o convite de menssagem privada\n"
-                           "/sair para sair \n"))
+                           "Digite /help para ver os comandos disponíveis.\n"))
 
-    while True:
+
+def enviar_comandos_disponiveis(conn):
+    comandos = (
+        "/listar - Lista todos os usuários conectados\n"
+        "/convite <nome> - Envia convite para chat privado\n"
+        "/aceitar - Aceita um convite de chat privado\n"
+        "/sair - Sai do chat (grupo ou privado)\n"
+        "/help - Mostra esta mensagem de ajuda\n"
+    )
+    conn.send(criptografar(comandos))
+
+
+def processar_comando(msg, username, conn):
+    # Verifica se está em chat privado
+    private_key = next((pair for pair in private_chats if username in pair), None)
+
+    if private_key:
+        other_user = next(user for user in private_key if user != username)
         try:
-            msg = descriptografar(conn.recv(1024))
-            if not msg:
-                break
+            clients[other_user].send(criptografar(f"[PRIVADO] {username}: {msg}"))
+        except:
+            pass
 
-            msg = msg.strip()
-            
-            # Aplica rate limit (exceto para comandos importantes)
-            is_command = msg.startswith("/")
-            important_command = any(msg.startswith(cmd) for cmd in ["/sair", "/listar", "/aceitar"])
-            
-            if not (is_command and important_command):
-                can_send, error_msg = check_rate_limit(username)
-                if not can_send:
-                    conn.send(criptografar(error_msg))
-                    continue
-
-            # Verifica se está em chat privado
-            private_key = None
-            for pair in private_chats:
-                if username in pair:
-                    private_key = pair
-                    break
-
-            if private_key:
-                other_user = next(user for user in private_key if user != username)
+            if msg == "/sair":
+                private_chats.pop(private_key, None)
+                group_chat.update([username, other_user])
                 try:
-                    clients[other_user].send(criptografar(f"[PRIVADO] {username}: {msg}"))
+                    clients[other_user].send(
+                        criptografar(f"{username} saiu da conversa privada. Ambos voltaram ao grupo.\n"))
                 except:
                     pass
+                conn.send(criptografar("Você saiu da conversa privada e voltou para o grupo.\n"))
 
-                # Verifica se usuário deseja sair da conversa privada
-                if msg == "/sair":
-                    private_chats.pop(private_key, None)
-                    group_chat.add(username)
-                    group_chat.add(other_user)
+                print(f"[LOG] {username} saiu da conversa privada com {other_user}")
 
-                    try:
-                        clients[other_user].send(criptografar(f"{username} saiu da conversa privada. Ambos voltaram ao grupo.\n"))
-                    except:
-                        pass
+        return True
 
-                    conn.send(criptografar("Você saiu da conversa privada e voltou para o grupo.\n"))
-                continue
+    if msg.startswith("/convite"):
+        partes = msg.split(maxsplit=1)
+        if len(partes) < 2:
+            conn.send(criptografar("Uso: /convite <nomeusuario>\n"))
+            return True
+        target = partes[1]
+        if target in group_chat and target != username:
+            invitations[target] = username
+            clients[target].send(criptografar(f"{username} convidou você para um chat privado. Digite /aceitar para entrar.\n"))
+        else:
+            conn.send(criptografar("Usuário inválido ou indisponível.\n"))
+        return True
 
-            if msg.startswith("/convite"):
-                parts = msg.split(maxsplit=1)
-                if len(parts) < 2:
-                    conn.send(criptografar("Uso correto: /convite <nome_do_usuário>\n"))
-                    continue
-                    
-                _, target = parts
-                if target in group_chat and target != username:
-                    invitations[target] = username
-                    clients[target].send(criptografar(f"{username} convidou você para um chat privado. Digite /aceitar para entrar.\n"))
-                else:
-                    conn.send(criptografar("Usuário inválido ou indisponível.\n"))
+    elif msg.startswith("/aceitar"):
+        sender = invitations.get(username)
+        if sender and sender in clients:
+            key = frozenset((username, sender))
+            private_chats[key] = (clients[username], clients[sender])
+            group_chat.difference_update({username, sender})
+            clients[sender].send(criptografar(f"{username} aceitou seu convite. Entrando em chat privado.\n"))
+            conn.send(criptografar("Você entrou em chat privado.\n"))
 
-            elif msg.startswith("/aceitar"):
-                sender = invitations.get(username)
-                if sender and sender in clients:
-                    key = frozenset((username, sender))
-                    private_chats[key] = (clients[username], clients[sender])
-                    group_chat.discard(username)
-                    group_chat.discard(sender)
+            print(f"[LOG] Conversa privada iniciada entre {username} e {sender}")
+        else:
+            conn.send(criptografar("Nenhum convite encontrado.\n"))
+        return True
 
-                    clients[sender].send(criptografar(f"{username} aceitou seu convite. Entrando em chat privado.\n"))
-                    clients[username].send(criptografar("Você entrou em chat privado.\n"))
-                else:
-                    conn.send(criptografar("Nenhum convite encontrado.\n"))
 
-            elif msg.startswith("/listar"):
-                user_list = "\n".join(clients.keys())
-                conn.send(criptografar(f"Usuários conectados:\n{user_list}\n"))
+    elif msg.startswith("/listar"):
+        user_list = "\n".join(clients.keys())
+        conn.send(criptografar(f"Usuários conectados:\n{user_list}\n"))
+        return True
 
-            elif msg.startswith("/sair"):
-                # Está no grupo, sai da aplicação
-                conn.send(criptografar("Você saiu do grupo e desconectou da aplicação.\n"))
-                clients.pop(username, None)
-                group_chat.discard(username)
-                break
+    elif msg.startswith("/sair"):
+        conn.send(criptografar("Você saiu do grupo e desconectou da aplicação.\n"))
+        clients.pop(username, None)
+        group_chat.discard(username)
+        conn.close()
+        return True
 
-            else:
-                broadcast_group(msg, username)
+    elif msg.startswith("/help"):
+        enviar_comandos_disponiveis(conn)
+        return True
 
-        except Exception as e:
-            print(f"Erro: {e}")
-            break
+    return False
 
+
+def encerrar_conexao(username, conn):
     conn.close()
-    cleanup_user(username)
-
-def cleanup_user(username):
-    """Remove o usuário de todas as estruturas de dados"""
-    # Remove usuário do dicionário de clientes e do grupo
     clients.pop(username, None)
     group_chat.discard(username)
-    
-    # Remove dados de rate limit
-    last_message_time.pop(username, None)
-    rate_limit_violations.pop(username, None)
-    rate_limit_timeouts.pop(username, None)
 
-    # Remove o usuário de qualquer chat privado
-    keys_to_remove = [k for k in private_chats if username in k]
-    for k in keys_to_remove:
+    # Remove de chats privados
+    for k in [k for k in private_chats if username in k]:
         other_user = next(user for user in k if user != username)
         try:
             clients[other_user].send(criptografar(f"{username} saiu do chat privado (desconectado). Você voltou ao grupo.\n"))
         except:
             pass
         group_chat.add(other_user)
-        del private_chats[k]
+        private_chats.pop(k)
 
     print(f"{username} desconectado")
 
 
+
 def start():
     host = 'localhost'
-    port = 12345
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind((host, port))
-    server.listen()
-    print(f"Servidor ouvindo em {host}:{port}")
+    port = 5556
+
+    gerar_certificado_se_necessario()
+    context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    context.load_cert_chain(certfile="certificado.crt", keyfile="chave.key")
+
+    raw_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    raw_socket.bind((host, port))
+    raw_socket.listen()
+    print(f"Servidor seguro ouvindo em {host}:{port} (TLS habilitado)")
 
     while True:
-        conn, addr = server.accept()
-        threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+        conn, addr = raw_socket.accept()
+        try:
+            secure_conn = context.wrap_socket(conn, server_side=True)
+            threading.Thread(target=handle_client, args=(secure_conn, addr), daemon=True).start()
+        except ssl.SSLError as e:
+            print(f"Erro SSL com {addr}: {e}")
+
 
 if __name__ == "__main__":
     try:
