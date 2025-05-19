@@ -18,13 +18,13 @@ def descriptografar(texto_criptografado):
 def receive_messages(sock):
     while True:
         try:
-            msg_criptografada = sock.recv(1024)
-            if msg_criptografada:
-                msg = descriptografar(msg_criptografada)
-                print(msg)
-            else:
+            data = sock.recv(1024)
+            if not data:
+                print("Conexão encerrada pelo servidor.")
                 break
-        except:
+            print(descriptografar(data))
+        except Exception as e:
+            print(f"Erro ao receber mensagem: {e}")
             break
 
 
@@ -55,6 +55,7 @@ def start():
             sock.send(criptografar(msg))
         except:
             break
+
 
 
 if __name__ == "__main__":

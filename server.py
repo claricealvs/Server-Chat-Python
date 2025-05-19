@@ -79,6 +79,8 @@ def check_rate_limit(username):
     last_message_time[username] = current_time
     return True, None
 
+import time
+
 def handle_client(conn, addr):
     if not enviar_chave_fernet(conn, addr):
         return
@@ -92,17 +94,38 @@ def handle_client(conn, addr):
     group_chat.add(username)
     enviar_mensagem_inicial(conn)
 
+    # === Controle de flood: 5 mensagens por 10 segundos ===
+    max_msgs = 5
+    intervalo = 10  # segundos
+    historico_msgs = []
+
     while True:
         try:
-            msg = descriptografar(conn.recv(1024)).strip()
-            if not msg:
+            # Limpa o histórico antigo
+            agora = time.time()
+            historico_msgs = [t for t in historico_msgs if agora - t < intervalo]
+
+            # Verifica se passou do limite
+            if len(historico_msgs) >= max_msgs:
+                conn.send(criptografar("Você foi desconectado por enviar muitas mensagens em pouco tempo."))
+                broadcast_group(f"{username} foi desconectado por enviar muitas mensagens em pouco tempo.","system")
+                print(f"[LOG] {username} foi desconectado por enviar muitas mensagens em pouco tempo.")
+                break  # Desconecta o cliente
+
+            # Recebe mensagem
+            raw = conn.recv(1024)
+            if not raw:
                 break
+            msg = descriptografar(raw).strip()
+
+            historico_msgs.append(agora)
 
             if processar_comando(msg, username, conn):
                 continue
             broadcast_group(msg, username)
 
-        except:
+        except Exception as e:
+            print(f"Erro com o cliente {username}: {e}")
             break
 
     encerrar_conexao(username, conn)
