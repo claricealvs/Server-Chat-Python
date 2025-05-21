@@ -25,20 +25,14 @@ clients = {}  # username -> conn
 group_chat = set()  # usernames
 private_chats = {}  # frozenset([user1, user2]) -> (conn1, conn2)
 invitations = {}  # receiver -> sender
-
-# === Rate limit ===
-last_message_time = {}  # username -> timestamp da última mensagem
-rate_limit_window = 0.5  # intervalo mínimo entre mensagens (em segundos)
-rate_limit_max_violations = 3  # número máximo de violações antes de aplicar timeout
-rate_limit_violations = {}  # username -> contagem de violações
-rate_limit_timeouts = {}  # username -> timestamp de quando o timeout expira
-
-
+historico_grupo = []
 def broadcast_group(message, sender):
+    texto = f"[GRUPO] {sender}: {message}"
+    historico_grupo.append(texto)
     for user in group_chat:
         if user != sender:
             try:
-                clients[user].send(criptografar(f"[GRUPO] {sender}: {message}"))
+                clients[user].send(criptografar(texto))
             except:
                 pass
 
@@ -126,8 +120,13 @@ def autenticar_usuario(conn):
 
 
 def enviar_mensagem_inicial(conn):
-    conn.send(criptografar("Bem-vindo ao chat em grupo!\n"
-                           "Digite /help para ver os comandos disponíveis.\n"))
+    conn.send(criptografar("Bem-vindo ao chat em grupo!\nDigite /help para ver os comandos disponíveis.\n"))
+    if historico_grupo:
+        conn.send(criptografar("\n--- Histórico do grupo ---\n"))
+        for linha in historico_grupo[-20:]:  # mostra as últimas 20 mensagens
+            conn.send(criptografar(linha))
+        conn.send(criptografar("\n---------------------------\n"))
+
 
 
 def enviar_comandos_disponiveis(conn):
@@ -135,6 +134,7 @@ def enviar_comandos_disponiveis(conn):
         "/listar - Lista todos os usuários conectados\n"
         "/convite <nome> - Envia convite para chat privado\n"
         "/aceitar - Aceita um convite de chat privado\n"
+        "/historico - Exibe todas as mensagens trocadas no grupo\n"
         "/sair - Sai do chat (grupo ou privado)\n"
         "/help - Mostra esta mensagem de ajuda\n"
     )
@@ -204,6 +204,17 @@ def processar_comando(msg, username, conn):
         conn.send(criptografar(f"Usuários conectados:\n{user_list}\n"))
         return True
 
+    elif msg.startswith("/historico"):
+        if historico_grupo:
+            conn.send(criptografar("\n--- Histórico do grupo ---\n"))
+            for linha in historico_grupo:
+                conn.send(criptografar(linha))
+            conn.send(criptografar("\n---------------------------\n"))
+        else:
+            conn.send(criptografar("Ainda não há mensagens no grupo.\n"))
+        return True
+
+
     elif msg.startswith("/sair"):
         conn.send(criptografar("Você saiu do grupo e desconectou da aplicação.\n"))
         clients.pop(username, None)
@@ -238,8 +249,8 @@ def encerrar_conexao(username, conn):
 
 
 def start():
-    host = 'localhost'
-    port = 5556
+    host = "10.44.52.102"
+    port = 5546
 
     gerar_certificado_se_necessario()
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)

@@ -30,8 +30,8 @@ def receive_messages(sock):
 
 def start():
     global fernet
-    host = 'localhost'
-    port = 5556
+    host = "10.44.52.102"
+    port = 5546
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     # Cria um contexto SSL
