@@ -50,8 +50,8 @@ def handle_client(conn, addr):
     group_chat.add(username)
     enviar_mensagem_inicial(conn)
 
-    max_msgs = 5
-    intervalo = 10  # segundos
+    max_msgs = 20
+    intervalo = 1 # segundos
     historico_msgs = []
 
     while True:
