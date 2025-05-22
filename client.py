@@ -1,62 +1,73 @@
 import socket
 import threading
+import time
 import ssl
 from cryptography.fernet import Fernet
 
-# Será inicializado após receber a chave do servidor
-fernet = None
+def start_cliente(id_cliente):
+    fernet = None
 
+    def criptografar(texto):
+        return fernet.encrypt(texto.encode())
 
-def criptografar(texto):
-    return fernet.encrypt(texto.encode())
+    def descriptografar(texto_criptografado):
+        return fernet.decrypt(texto_criptografado).decode()
 
+    HOST = '192.168.0.104'
+    PORT = 5556
 
-def descriptografar(texto_criptografado):
-    return fernet.decrypt(texto_criptografado).decode()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
+        context = ssl._create_unverified_context()
 
-def receive_messages(sock):
-    while True:
-        try:
-            data = sock.recv(1024)
-            if not data:
-                print("Conexão encerrada pelo servidor.")
-                break
-            print(descriptografar(data))
-        except Exception as e:
-            print(f"Erro ao receber mensagem: {e}")
-            break
+        sock = context.wrap_socket(sock, server_hostname=HOST)
+        sock.connect((HOST, PORT))
 
+        print(f"[CLIENTE {id_cliente}] Conectado ao servidor via SSL")
 
-def start():
-    global fernet
-    host = 'localhost'
-    port = 5556
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        chave_recebida = sock.recv(1024).strip()
+        fernet = Fernet(chave_recebida)
 
-    # Cria um contexto SSL
-    context = ssl._create_unverified_context()
+        nickname = f"bot{id_cliente}"
+        sock.send(fernet.encrypt(nickname.encode()))
+        print(f"[CLIENTE {id_cliente}] Nickname '{nickname}' enviado.")
 
-    # Conecta o socket ao servidor através de SSL
-    sock = context.wrap_socket(sock, server_hostname=host)
-    sock.connect((host, port))
+        # Thread para receber mensagens
+        def receber():
+            while True:
+                try:
+                    data = sock.recv(1024)
+                    if not data:
+                        print(f"[CLIENTE {id_cliente}] Conexão encerrada pelo servidor.")
+                        break
+                    decrypted_msg = descriptografar(data)
+                    print(f"[CLIENTE {id_cliente}] Servidor: {decrypted_msg}")
+                except Exception as e:
+                    print(f"[CLIENTE {id_cliente}] Erro ao receber: {e}")
+                    break
 
-    # === Recebe a chave Fernet antes de qualquer mensagem ===
-    chave_recebida = sock.recv(1024).strip()
-    fernet = Fernet(chave_recebida)
+        threading.Thread(target=receber, daemon=True).start()
 
-    # === Inicia a thread de recebimento ===
-    threading.Thread(target=receive_messages, args=(sock,), daemon=True).start()
+        for i in range(5):
+            mensagem = f"Olá do cliente {id_cliente} - msg {i}"
+            encrypted = criptografar(mensagem)
+            sock.send(encrypted)
+            print(f"[CLIENTE {id_cliente}] Mensagem enviada: {mensagem}")
+            time.sleep(1)
 
-    # === Loop de envio de mensagens ===
-    while True:
-        try:
-            msg = input()
-            sock.send(criptografar(msg))
-        except:
-            break
+        sock.close()
+        print(f"[CLIENTE {id_cliente}] Desconectado")
 
+    except Exception as e:
+        print(f"[CLIENTE {id_cliente}] Falha na conexão: {e}")
 
+# Cria múltiplas conexões
+def criar_multiplas_conexoes(qtd):
+    for i in range(qtd):
+        threading.Thread(target=start_cliente, args=(i,), daemon=True).start()
+        time.sleep(0.5)
 
-if __name__ == "__main__":
-    start()
+if _name_ == "_main_":
+    criar_multiplas_conexoes(1000)
+    time.sleep(30)
